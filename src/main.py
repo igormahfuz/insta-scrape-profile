@@ -18,7 +18,7 @@ import re
 # --- Constants ---
 PROFILE_ENDPOINT = "https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
 CONTACT_ENDPOINT = "https://www.instagram.com/api/v1/business/users/{user_id}/contact_info/"
-CHAINING_ENDPOINT = "https://www.instagram.com/api/v1/users/{user_id}/chaining/"
+GRAPHQL_ENDPOINT = "https://www.instagram.com/graphql/query/"
 
 # --- Helper Functions ---
 
@@ -40,8 +40,8 @@ def parse_bio(biography: str) -> dict:
 # --- Main Logic (Corrected to be Sequential) ---
 
 async def fetch_deep_profile(
-    client: httpx.AsyncClient, 
-    username: str, 
+    client: httpx.AsyncClient,
+    username: str,
     session_cookies: str
 ) -> dict:
     """Fetches profile data using a sequential multi-step process."""
@@ -70,21 +70,36 @@ async def fetch_deep_profile(
             return {"username": username, "profile_data": user_data, "error": None}
 
         # Step 3: Sequentially fetch contact info if available
-        if user_data.get('should_show_public_contacts'):
-            try:
-                r_contact = await client.get(CONTACT_ENDPOINT.format(user_id=user_id), headers=headers, timeout=20)
-                r_contact.raise_for_status()
-                user_data.update(r_contact.json())
-            except Exception as e:
-                Actor.log.warning(f"Could not fetch contact details for {username}: {e}")
+        #if user_data.get('should_show_public_contacts'):
+        #    try:
+        #        r_contact = await client.get(CONTACT_ENDPOINT.format(user_id=user_id), headers=headers, timeout=20)
+        #        r_contact.raise_for_status()
+        #        user_data.update(r_contact.json())
+        #    except Exception as e:
+        #        Actor.log.warning(f"Could not fetch contact details for {username}: {e}")
 
-        # Step 4: Sequentially fetch related profiles if available
+        # Step 4: Sequentially fetch related profiles using GraphQL
         if user_data.get('has_chaining'):
             try:
-                r_chaining = await client.get(CHAINING_ENDPOINT.format(user_id=user_id), headers=headers, timeout=20)
+                graphql_variables = {
+                    "user_id": user_id,
+                    "include_chaining": True,
+                    "include_reel": False,
+                    "include_suggested_users": True,
+                    "include_logged_out_extras": False,
+                    "include_highlight_reels": False,
+                    "include_related_profiles": True, # This is the important one
+                }
+                params = {
+                    'query_hash': '7c16654f22c819fb63d1183034a5162f',
+                    'variables': json.dumps(graphql_variables),
+                }
+                r_chaining = await client.get(GRAPHQL_ENDPOINT, params=params, headers=headers, timeout=20)
                 r_chaining.raise_for_status()
                 chaining_data = r_chaining.json()
-                user_data['related_profiles'] = chaining_data.get('users', [])
+                # The response structure is different for GraphQL
+                if 'data' in chaining_data and 'user' in chaining_data['data'] and 'edge_related_profiles' in chaining_data['data']['user']:
+                    user_data['related_profiles'] = chaining_data['data']['user']['edge_related_profiles'].get('edges', [])
             except Exception as e:
                 Actor.log.warning(f"Could not fetch related profiles for {username}: {e}")
 

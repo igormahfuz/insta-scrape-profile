@@ -1,0 +1,25 @@
+{
+  "title": "Instagram Full Profile Scraper Input",
+  "description": "Specify the Instagram usernames to scrape and the desired concurrency.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "usernames": {
+      "title": "Usernames",
+      "type": "array",
+      "description": "A list of Instagram usernames to scrape.",
+      "editor": "stringList",
+      "prefill": ["instagram", "meta"]
+    },
+    "concurrency": {
+      "title": "Concurrency",
+      "type": "integer",
+      "description": "The number of profiles to process in parallel.",
+      "default": 100,
+      "minimum": 1
+    }
+  },
+  "required": [
+    "usernames"
+  ]
+}

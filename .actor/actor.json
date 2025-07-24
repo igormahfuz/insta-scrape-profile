@@ -1,0 +1,12 @@
+{
+	"actorSpecification": 1,
+	"name": "instagram-full-profile-scraper",
+	"version": "0.1",
+	"build": {
+		"buildNumber": "0.1.0",
+		"buildTag": "latest"
+	},
+	"meta": {
+		"templateId": "python-start"
+	}
+}

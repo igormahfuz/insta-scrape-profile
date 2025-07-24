@@ -1,11 +1,8 @@
 """
-Actor to extract full profile data for public Instagram accounts.
+Actor to extract deep profile data for public Instagram accounts using the authenticated GraphQL API.
 
-- Does not require login or cookies.
-- Uses the public endpoint `https://i.instagram.com/api/v1/users/web_profile_info/?username=<user>`
-  (with X-IG-App-ID header).
-- For each profile, it fetches the complete user data object and returns it.
-- This approach is robust to API changes as it captures the entire raw user data.
+This actor requires Instagram session cookies to make authenticated requests.
+It fetches the complete user data object, including private contact information like email and phone number.
 """
 
 from __future__ import annotations
@@ -13,51 +10,58 @@ from apify import Actor
 import httpx
 import asyncio
 import importlib.metadata
+from urllib.parse import quote
 
-# Endpoint to get public user information.
-IG_ENDPOINT = (
-    "https://i.instagram.com/api/v1/users/web_profile_info/"
-    "?username={username}"
-)
+# This is the internal GraphQL endpoint used by the Instagram web app.
+GRAPHQL_ENDPOINT = "https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
 
-# This App ID is public and used by the Instagram web app.
-HEADERS = {
-    "x-ig-app-id": "936619743392459",
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-    ),
-}
+# --- Main Logic Function (Rewritten for GraphQL) ---
 
-# --- Main Logic Function (Corrected) ---
+async def fetch_profile(client: httpx.AsyncClient, username: str, session_cookies: str) -> dict:
+    """Fetches the profile using the authenticated GraphQL endpoint."""
+    url = GRAPHQL_ENDPOINT.format(username=username)
+    
+    # Construct the headers with the provided session cookies for authentication.
+    # The x-ig-app-id is a public ID used by the web app.
+    headers = {
+        "Cookie": session_cookies,
+        "x-ig-app-id": "936619743392459",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    }
 
-async def fetch_profile(client: httpx.AsyncClient, username: str) -> dict:
-    """Fetches the profile and returns the entire user data object."""
-    url = IG_ENDPOINT.format(username=username)
     try:
-        r = await client.get(url, headers=HEADERS, follow_redirects=True, timeout=30)
+        r = await client.get(url, headers=headers, follow_redirects=True, timeout=30)
         r.raise_for_status()
-        user_data = r.json().get("data", {}).get("user")
+        
+        response_json = r.json()
+        user_data = response_json.get("data", {}).get("user")
 
         if not user_data:
-            return {"username": username, "error": "Profile does not exist or is private"}
+            # Log the raw response if the expected data is not found.
+            Actor.log.warning(f"User object not found for {username}. Response: {response_json}")
+            return {"username": username, "error": "User object not found in API response"}
 
-        # Return the entire user object. This is more robust than cherry-picking fields.
-        # The username is added for context.
+        # The entire user object is returned, containing all deep profile data.
         return {
             "username": username,
             "profile_data": user_data,
             "error": None,
         }
 
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 401 or e.response.status_code == 403:
+            Actor.log.error(f"Authentication failed for {username}. Your session cookies might be invalid or expired. Status: {e.response.status_code}")
+            return {"username": username, "error": "Authentication failed. Please provide valid session cookies."}
+        # Let the retry wrapper handle other HTTP errors.
+        raise e
     except Exception as e:
-        # Let the retry wrapper handle exceptions.
+        # Let the retry wrapper handle other exceptions.
         raise e
 
 # --- Wrapper with Retries (Unmodified) ---
 
-async def fetch_with_retries(username: str, proxy_config) -> dict:
-    """Wraps the fetch function with retry logic for network-related errors."""
+async def fetch_with_retries(username: str, proxy_config, session_cookies: str) -> dict:
+    """Wraps the fetch function with retry logic."""
     MAX_RETRIES = 3
     BASE_DELAY_SECONDS = 2
     last_error = None
@@ -68,7 +72,7 @@ async def fetch_with_retries(username: str, proxy_config) -> dict:
             proxy_url = await proxy_config.new_url(session_id=session_id)
             transport = httpx.AsyncHTTPTransport(proxy=proxy_url)
             async with httpx.AsyncClient(transport=transport) as client:
-                return await fetch_profile(client, username)
+                return await fetch_profile(client, username, session_cookies)
         except (httpx.HTTPStatusError, httpx.ProxyError, httpx.ReadTimeout) as e:
             last_error = e
             Actor.log.warning(f"Attempt {attempt + 1}/{MAX_RETRIES} failed for '{username}': {type(e).__name__}. Retrying...")
@@ -79,23 +83,24 @@ async def fetch_with_retries(username: str, proxy_config) -> dict:
 
     return {"username": username, "error": f"Failed after {MAX_RETRIES} attempts: {type(last_error).__name__}"}
 
-# --- Processing and Saving Function (Unmodified) ---
+# --- Processing and Saving Function (Modified) ---
 
 async def process_and_save_username(
     username: str,
     proxy_config,
-    semaphore: asyncio.Semaphore
+    semaphore: asyncio.Semaphore,
+    session_cookies: str
 ) -> dict:
     """Processes a single username and saves the result to the dataset if successful."""
     async with semaphore:
-        result = await fetch_with_retries(username, proxy_config)
+        result = await fetch_with_retries(username, proxy_config, session_cookies)
         
         if result.get("error") is None:
             await Actor.push_data(result)
         
         return result
 
-# --- Main Actor Function (Unmodified) ---
+# --- Main Actor Function (Modified) ---
 
 async def main() -> None:
     """Main function to run the actor."""
@@ -104,10 +109,13 @@ async def main() -> None:
 
         inp = await Actor.get_input() or {}
         usernames: list[str] = inp.get("usernames", [])
-        concurrency = inp.get("concurrency", 100)
+        session_cookies: str = inp.get("sessionCookies", "")
+        concurrency = inp.get("concurrency", 50)
 
         if not usernames:
-            raise ValueError("Input 'usernames' (a list of profiles) is required.")
+            raise ValueError("Input 'usernames' is required.")
+        if not session_cookies:
+            raise ValueError("Input 'sessionCookies' is required for authentication.")
 
         semaphore = asyncio.Semaphore(concurrency)
         proxy_configuration = await Actor.create_proxy_configuration(groups=['RESIDENTIAL'])
@@ -124,7 +132,7 @@ async def main() -> None:
                 total_usernames -= 1
                 continue
             
-            task = process_and_save_username(clean_username, proxy_configuration, semaphore)
+            task = process_and_save_username(clean_username, proxy_configuration, semaphore, session_cookies)
             tasks.append(task)
 
         for future in asyncio.as_completed(tasks):

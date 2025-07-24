@@ -1,7 +1,7 @@
 """
 Actor to extract deep profile data for public Instagram accounts.
 
-This actor uses a multi-pronged approach:
+This actor uses a sequential, multi-step process to avoid rate-limiting:
 1.  It hits the authenticated web profile endpoint to get the main user data.
 2.  If the user has public contacts, it makes a second API call to get the public email and phone number.
 3.  It makes a third API call to the 'chaining' endpoint to get suggested/related profiles.
@@ -37,14 +37,14 @@ def parse_bio(biography: str) -> dict:
         "tagged_in_bio": re.findall(tag_regex, biography),
     }
 
-# --- Main Logic ---
+# --- Main Logic (Corrected to be Sequential) ---
 
 async def fetch_deep_profile(
     client: httpx.AsyncClient, 
     username: str, 
     session_cookies: str
 ) -> dict:
-    """Fetches profile data using a multi-step process."""
+    """Fetches profile data using a sequential multi-step process."""
     headers = {
         "Cookie": session_cookies,
         "x-ig-app-id": "936619743392459",
@@ -52,7 +52,7 @@ async def fetch_deep_profile(
     }
 
     try:
-        # 1. Get the main profile data
+        # Step 1: Get the main profile data
         profile_url = PROFILE_ENDPOINT.format(username=username)
         r_profile = await client.get(profile_url, headers=headers, follow_redirects=True, timeout=30)
         r_profile.raise_for_status()
@@ -61,7 +61,7 @@ async def fetch_deep_profile(
         if not user_data:
             return {"username": username, "error": "User object not found"}
 
-        # 2. Parse bio for contacts and tags
+        # Step 2: Parse bio
         bio_analysis = parse_bio(user_data.get('biography'))
         user_data.update(bio_analysis)
 
@@ -69,43 +69,33 @@ async def fetch_deep_profile(
         if not user_id:
             return {"username": username, "profile_data": user_data, "error": None}
 
-        # 3. Fetch contact info and related profiles in parallel
-        tasks = {}
+        # Step 3: Sequentially fetch contact info if available
         if user_data.get('should_show_public_contacts'):
-            tasks['contact'] = client.get(CONTACT_ENDPOINT.format(user_id=user_id), headers=headers, timeout=20)
-        
+            try:
+                r_contact = await client.get(CONTACT_ENDPOINT.format(user_id=user_id), headers=headers, timeout=20)
+                r_contact.raise_for_status()
+                user_data.update(r_contact.json())
+            except Exception as e:
+                Actor.log.warning(f"Could not fetch contact details for {username}: {e}")
+
+        # Step 4: Sequentially fetch related profiles if available
         if user_data.get('has_chaining'):
-            tasks['chaining'] = client.get(CHAINING_ENDPOINT.format(user_id=user_id), headers=headers, timeout=20)
-
-        responses = await asyncio.gather(*tasks.values(), return_exceptions=True)
-        
-        # Process responses
-        response_map = dict(zip(tasks.keys(), responses))
-
-        # Contact Info
-        if 'contact' in response_map and isinstance(response_map['contact'], httpx.Response):
-            response_map['contact'].raise_for_status()
-            contact_data = response_map['contact'].json()
-            user_data.update(contact_data)
-        elif 'contact' in response_map:
-            Actor.log.warning(f"Could not fetch contact details for {username}: {response_map['contact']}")
-
-        # Chaining/Related Profiles
-        if 'chaining' in response_map and isinstance(response_map['chaining'], httpx.Response):
-            response_map['chaining'].raise_for_status()
-            chaining_data = response_map['chaining'].json()
-            user_data['related_profiles'] = chaining_data.get('users', [])
-        elif 'chaining' in response_map:
-            Actor.log.warning(f"Could not fetch related profiles for {username}: {response_map['chaining']}")
+            try:
+                r_chaining = await client.get(CHAINING_ENDPOINT.format(user_id=user_id), headers=headers, timeout=20)
+                r_chaining.raise_for_status()
+                chaining_data = r_chaining.json()
+                user_data['related_profiles'] = chaining_data.get('users', [])
+            except Exception as e:
+                Actor.log.warning(f"Could not fetch related profiles for {username}: {e}")
 
         return {"username": username, "profile_data": user_data, "error": None}
 
     except httpx.HTTPStatusError as e:
         if e.response.status_code in [401, 403]:
             return {"username": username, "error": "Authentication failed"}
-        raise e
+        raise e # Let the retry wrapper handle other status errors
     except Exception as e:
-        raise e
+        raise e # Let the retry wrapper handle other errors
 
 # --- Boilerplate (Retries, Main Loop) ---
 
@@ -138,7 +128,7 @@ async def main() -> None:
         inp = await Actor.get_input() or {}
         usernames: list[str] = inp.get("usernames", [])
         session_cookies: str = inp.get("sessionCookies", "")
-        concurrency = inp.get("concurrency", 50)
+        concurrency = inp.get("concurrency", 10) # Reduced default concurrency
 
         if not usernames or not session_cookies:
             raise ValueError("Inputs 'usernames' and 'sessionCookies' are required.")
@@ -148,7 +138,7 @@ async def main() -> None:
         
         tasks = [process_and_save_username(u.strip("@ "), proxy_configuration, semaphore, session_cookies) for u in usernames if u.strip("@ ")]
         total_tasks = len(tasks)
-        Actor.log.info(f"Starting processing for {total_tasks} usernames.")
+        Actor.log.info(f"Starting processing for {total_tasks} usernames with concurrency {concurrency}.")
 
         processed_count = 0
         for future in asyncio.as_completed(tasks):

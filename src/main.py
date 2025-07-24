@@ -25,11 +25,9 @@ def parse_bio_for_contacts(biography: str) -> dict:
     if not biography:
         return {}
 
-    # Regex for finding email addresses
     email_regex = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
     emails_found = re.findall(email_regex, biography)
     
-    # Regex for finding phone numbers (basic, can be improved)
     phone_regex = r'(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{2,3}\)?[-.\s]?)?\d{4,5}[-.\s]?\d{4}'
     phones_found = re.findall(phone_regex, biography)
 
@@ -53,7 +51,6 @@ async def fetch_deep_profile(
     }
 
     try:
-        # 1. Get the main profile data
         profile_url = PROFILE_ENDPOINT.format(username=username)
         r_profile = await client.get(profile_url, headers=headers, follow_redirects=True, timeout=30)
         r_profile.raise_for_status()
@@ -65,12 +62,10 @@ async def fetch_deep_profile(
             Actor.log.warning(f"User object not found for {username}. Response: {profile_json}")
             return {"username": username, "error": "User object not found"}
 
-        # 2. Parse bio for any immediate contact info
         bio_contacts = parse_bio_for_contacts(user_data.get('biography'))
         user_data['email_from_bio'] = bio_contacts.get('email_from_bio')
         user_data['phone_from_bio'] = bio_contacts.get('phone_from_bio')
 
-        # 3. If public contacts are available, make a second call for them
         if user_data.get('should_show_public_contacts'):
             user_id = user_data.get('id')
             if user_id:
@@ -80,11 +75,10 @@ async def fetch_deep_profile(
                     r_contact.raise_for_status()
                     contact_data = r_contact.json()
                     
-                    # Merge the contact data into the main user object
                     user_data['public_phone_number'] = contact_data.get('public_phone_number')
                     user_data['public_phone_country_code'] = contact_data.get('public_phone_country_code')
                     user_data['public_email'] = contact_data.get('public_email')
-                    user_data['contact_method'] = contact_data.get('contact_method') # e.g., CALL, TEXT, EMAIL
+                    user_data['contact_method'] = contact_data.get('contact_method')
 
                 except httpx.HTTPStatusError as e_contact:
                     Actor.log.warning(f"Could not fetch contact details for {username} (User ID: {user_id}). Status: {e_contact.response.status_code}")
@@ -105,7 +99,7 @@ async def fetch_deep_profile(
     except Exception as e:
         raise e
 
-# --- Boilerplate (Retries, Main Loop) - Unmodified from previous robust versions ---
+# --- Boilerplate (Retries, Main Loop) ---
 
 async def fetch_with_retries(username: str, proxy_config, session_cookies: str) -> dict:
     MAX_RETRIES = 3
@@ -115,7 +109,8 @@ async def fetch_with_retries(username: str, proxy_config, session_cookies: str) 
         try:
             session_id = f'session_{username}_{attempt}'
             proxy_url = await proxy_config.new_url(session_id=session_id)
-            async with httpx.AsyncClient(proxies=proxy_url) as client:
+            # CORRECTED: Changed 'proxies' to 'proxy'
+            async with httpx.AsyncClient(proxy=proxy_url) as client:
                 return await fetch_deep_profile(client, username, session_cookies)
         except (httpx.HTTPStatusError, httpx.ProxyError, httpx.ReadTimeout) as e:
             last_error = e

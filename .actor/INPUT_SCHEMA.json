@@ -1,6 +1,6 @@
 {
-  "title": "Instagram Full Profile Scraper Input",
-  "description": "Specify the Instagram usernames to scrape and the desired concurrency.",
+  "title": "Instagram GraphQL Scraper Input",
+  "description": "Provide Instagram usernames and your session cookies to extract deep profile data.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
@@ -9,17 +9,25 @@
       "type": "array",
       "description": "A list of Instagram usernames to scrape.",
       "editor": "stringList",
-      "prefill": ["instagram", "meta"]
+      "prefill": ["mkrslab"]
+    },
+    "sessionCookies": {
+      "title": "Session Cookies",
+      "type": "string",
+      "description": "Your Instagram session cookies (e.g., from the 'cookie' header in your browser's network tools). This is required for authentication.",
+      "editor": "textfield",
+      "isSecret": true
     },
     "concurrency": {
       "title": "Concurrency",
       "type": "integer",
       "description": "The number of profiles to process in parallel.",
-      "default": 100,
+      "default": 50,
       "minimum": 1
     }
   },
   "required": [
-    "usernames"
+    "usernames",
+    "sessionCookies"
   ]
 }
